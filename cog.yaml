@@ -3,9 +3,7 @@
 
 build:
   gpu: true
-
   python_version: "3.11"
-
   python_packages:
     - "torch==2.0.1"
     - "accelerate==0.21.0"
@@ -22,7 +20,6 @@ build:
     - "scikit-learn==1.2.2"
     - "sentencepiece==0.1.99"
     - "shortuuid==1.0.11"
-    - "timm==0.6.13"
     - "tokenizers==0.13.3"
     - "torch==2.0.1"
     - "torchvision==0.15.2"
