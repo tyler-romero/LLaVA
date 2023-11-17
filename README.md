@@ -1,3 +1,8 @@
+Forked LLaVA repo with some small modifications:
+1. No timm dependency
+2. Modified `predict.py` file that will return the probabilties for the final generated token.
+
+
 # 🌋 LLaVA: Large Language and Vision Assistant
 
 *Visual instruction tuning towards large language and vision models with GPT-4 level capabilities.*
