@@ -1,6 +1,4 @@
 import os
-import subprocess
-import time
 from io import BytesIO
 
 import requests
@@ -17,32 +15,12 @@ from llava.utils import disable_torch_init
 
 os.environ["HUGGINGFACE_HUB_CACHE"] = os.getcwd() + "/weights"
 
-# url for the weights mirror
-REPLICATE_WEIGHTS_URL = "https://weights.replicate.delivery/default"
-# files to download from the weights mirrorsr
-weights = [
-    {
-        "dest": "liuhaotian/llava-v1.5-13b",
-        # git commit hash from huggingface
-        "src": "llava-v1.5-13b/006818fc465ebda4c003c0998674d9141d8d95f8",
-        "files": [
-            "config.json",
-            "generation_config.json",
-            "pytorch_model-00001-of-00003.bin",
-            "pytorch_model-00002-of-00003.bin",
-            "pytorch_model-00003-of-00003.bin",
-            "pytorch_model.bin.index.json",
-            "special_tokens_map.json",
-            "tokenizer.model",
-            "tokenizer_config.json",
-        ],
-    },
-    {
-        "dest": "openai/clip-vit-large-patch14-336",
-        "src": "clip-vit-large-patch14-336/ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
-        "files": ["config.json", "preprocessor_config.json", "pytorch_model.bin"],
-    },
-]
+ACTIVE_MODEL = "Lin-Chen/ShareGPT4V-7B"
+
+MODEL_TO_ARCH = {
+    "Lin-Chen/ShareGPT4V-7B": "llava-v1.5-7b",  # https://arxiv.org/pdf/2311.12793.pdf
+    "liuhaotian/llava-v1.5-13b": "llava-v1.5-13b",  # https://arxiv.org/abs/2310.03744
+}
 
 
 def download_json(url: str, dest: Path) -> None:
@@ -52,27 +30,6 @@ def download_json(url: str, dest: Path) -> None:
             f.write(res.content)
     else:
         print(f"Failed to download {url}. Status code: {res.status_code}")
-
-
-def download_weights(baseurl: str, basedest: str, files: list[str]) -> None:
-    """
-    Download the specified files from Replicate into the given destination directory.
-    If the files already exist, they will not be downloaded again.
-    """
-    basedest: Path = Path(basedest)
-    start = time.time()
-    print("downloading to: ", basedest)
-    basedest.mkdir(parents=True, exist_ok=True)
-    for f in files:
-        dest = basedest / f
-        url = os.path.join(REPLICATE_WEIGHTS_URL, baseurl, f)
-        if not dest.exists():
-            print("downloading url: ", url)
-            if dest.suffix == ".json":
-                download_json(url, dest)
-            else:
-                subprocess.check_call(["pget", url, str(dest)], close_fds=False)
-    print("downloading took: ", time.time() - start)
 
 
 class Output(BaseModel):
@@ -88,18 +45,15 @@ class Output(BaseModel):
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
-        for weight in weights:
-            download_weights(weight["src"], weight["dest"], weight["files"])
         disable_torch_init()
-
         (
             self.tokenizer,
             self.model,
             self.image_processor,
             self.context_len,
         ) = load_pretrained_model(
-            "liuhaotian/llava-v1.5-13b",
-            model_name="llava-v1.5-13b",
+            model_path=ACTIVE_MODEL,
+            model_name=MODEL_TO_ARCH[ACTIVE_MODEL],
             model_base=None,
             load_8bit=False,
             load_4bit=False,
@@ -186,7 +140,7 @@ class Predictor(BasePredictor):
                 self.model.generate(  # BS, SEQ_LEN, VOCAB_SIZE
                     input_ids,
                     images=image_tensor,
-                    do_sample=False,
+                    do_sample=True if temperature > 0.01 else False,
                     temperature=temperature,
                     top_p=top_p,
                     max_new_tokens=max_tokens,
