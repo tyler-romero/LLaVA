@@ -15,21 +15,12 @@ from llava.utils import disable_torch_init
 
 os.environ["HUGGINGFACE_HUB_CACHE"] = os.getcwd() + "/weights"
 
-ACTIVE_MODEL = "Lin-Chen/ShareGPT4V-7B"
+ACTIVE_MODEL = "liuhaotian/llava-v1.5-13b"
 
 MODEL_TO_ARCH = {
     "Lin-Chen/ShareGPT4V-7B": "llava-v1.5-7b",  # https://arxiv.org/pdf/2311.12793.pdf
     "liuhaotian/llava-v1.5-13b": "llava-v1.5-13b",  # https://arxiv.org/abs/2310.03744
 }
-
-
-def download_json(url: str, dest: Path) -> None:
-    res = requests.get(url, allow_redirects=True)
-    if res.status_code == 200 and res.content:
-        with dest.open("wb") as f:
-            f.write(res.content)
-    else:
-        print(f"Failed to download {url}. Status code: {res.status_code}")
 
 
 class Output(BaseModel):
@@ -38,8 +29,8 @@ class Output(BaseModel):
     """
 
     output: str
-    retrieve_scores_for_tokens: list[str]
-    token_probabilities: list[float]
+    top_tokens: list[str]
+    token_logprobs: list[float]
 
 
 class Predictor(BasePredictor):
@@ -79,29 +70,14 @@ class Predictor(BasePredictor):
             default=1024,
             ge=0,
         ),
-        retrieve_scores_for_tokens: str = Input(
-            description="Comma separated list of tokens to return scores for",
-            default="",
+        logprobs: int = Input(
+            description="Number of logprobs to return", ge=0, le=10, default=0
         ),
     ) -> Output:
         """Run a single prediction on the model"""
 
         conv_mode = "llava_v1"
         conv = conv_templates[conv_mode].copy()
-
-        # Get the token_ids for the tokens we want to retrieve scores for
-        retrieve_scores_for_token_ids = {}
-        if len(retrieve_scores_for_tokens) > 0:
-            retrieve_scores_for_tokens = retrieve_scores_for_tokens.split(",")
-            for token in retrieve_scores_for_tokens:
-                token_ids = self.tokenizer.encode(token, add_special_tokens=False)
-                print(token_ids)
-                if len(token_ids) != 1:
-                    raise ValueError(
-                        f"Token {token} must be a single token"
-                    )  # TODO: abstract to sequences of tokens
-                token_id = token_ids[0]
-                retrieve_scores_for_token_ids[token_id] = token
 
         image_data = load_image(str(image))
         image_tensor = (
@@ -167,37 +143,27 @@ class Predictor(BasePredictor):
             ]  # remove last token if it is a keyword
             scores = scores[:-1]
 
-        last_token_scores = scores[-1][
+        last_token_logits = scores[-1][
             0, :
         ]  # [NEW_SEQ_LEN][BS, VOCAB_SIZE] -> [VOCAB_SIZE]
 
-        # Compute the probability scores for the specified tokens and '__other__' category
-        token_probabilities = {}
-        sum_of_specified_token_probs = torch.tensor(
-            0.0, device=last_token_scores.device
-        )
-        for token_id, token in retrieve_scores_for_token_ids.items():
-            token_probability = (
-                torch.softmax(last_token_scores, dim=0)[token_id].cpu().item()
-            )
-            token_probabilities[token] = token_probability
-            sum_of_specified_token_probs += token_probability
-
-        # Calculate the total probability of all other tokens by subtraction
-        token_probabilities["__other__"] = 1 - sum_of_specified_token_probs.cpu().item()
+        last_token_logprobs = torch.log_softmax(last_token_logits, dim=0)
+        top_k_results = torch.topk(last_token_logprobs, k=logprobs, dim=0)
+        top_k_logprobs = top_k_results.values.cpu().tolist()
+        top_k_token_ids = top_k_results.indices
+        top_k_tokens: list[str] = self.tokenizer.batch_decode(top_k_token_ids)
 
         decoded_outputs = self.tokenizer.decode(
             generated_sequence, skip_special_tokens=True
         ).strip()
-        conv.messages[-1][-1] = decoded_outputs
 
         if decoded_outputs.endswith(stop_str):
             decoded_outputs = decoded_outputs[: -len(stop_str)].strip()
 
         return Output(
             output=decoded_outputs,
-            retrieve_scores_for_tokens=list(token_probabilities.keys()),
-            token_probabilities=list(token_probabilities.values()),
+            top_tokens=top_k_tokens,
+            token_logprobs=top_k_logprobs,
         )
 
 
