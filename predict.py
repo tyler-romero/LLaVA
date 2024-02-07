@@ -8,19 +8,29 @@ from PIL import Image
 from transformers.generation import GreedySearchDecoderOnlyOutput
 
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
-from llava.conversation import SeparatorStyle, conv_templates
-from llava.mm_utils import KeywordsStoppingCriteria, tokenizer_image_token
+from llava.conversation import conv_templates
+from llava.mm_utils import (
+    tokenizer_image_token,
+)
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 
 os.environ["HUGGINGFACE_HUB_CACHE"] = os.getcwd() + "/weights"
 
-ACTIVE_MODEL = "liuhaotian/llava-v1.5-13b"
+# See options here: https://github.com/haotian-liu/LLaVA/blob/main/docs/MODEL_ZOO.md
+ACTIVE_MODEL = "liuhaotian/llava-v1.6-34b"
 
-MODEL_TO_ARCH = {
-    "Lin-Chen/ShareGPT4V-7B": "llava-v1.5-7b",  # https://arxiv.org/pdf/2311.12793.pdf
-    "liuhaotian/llava-v1.5-13b": "llava-v1.5-13b",  # https://arxiv.org/abs/2310.03744
-}
+
+def get_model_name_from_path(model_path):
+    if "ShareGPT4V-7B" in model_path:
+        return "llava-v1.5-7b"
+
+    model_path = model_path.strip("/")
+    model_paths = model_path.split("/")
+    if model_paths[-1].startswith("checkpoint-"):
+        return model_paths[-2] + "_" + model_paths[-1]
+    else:
+        return model_paths[-1]
 
 
 class Output(BaseModel):
@@ -44,7 +54,7 @@ class Predictor(BasePredictor):
             self.context_len,
         ) = load_pretrained_model(
             model_path=ACTIVE_MODEL,
-            model_name=MODEL_TO_ARCH[ACTIVE_MODEL],
+            model_name=get_model_name_from_path(ACTIVE_MODEL),
             model_base=None,
             load_8bit=False,
             load_4bit=False,
@@ -104,12 +114,6 @@ class Predictor(BasePredictor):
             .unsqueeze(0)
             .cuda()
         )
-        stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-        keywords = [stop_str]
-
-        stopping_criteria = KeywordsStoppingCriteria(
-            keywords, self.tokenizer, input_ids
-        )
 
         with torch.inference_mode():
             outputs: GreedySearchDecoderOnlyOutput = (
@@ -122,7 +126,6 @@ class Predictor(BasePredictor):
                     max_new_tokens=max_tokens,
                     use_cache=True,
                     output_scores=True,  # return prediction logits
-                    stopping_criteria=[stopping_criteria],
                     return_dict_in_generate=True,
                 )
             )
@@ -133,14 +136,7 @@ class Predictor(BasePredictor):
         scores = outputs.scores  # [NEW_SEQ_LEN][BS, VOCAB_SIZE]
 
         # Remove stopping keywords from end of the generated sequence
-        keyword_ids = [
-            keyword_id.to(generated_sequence.device)
-            for keyword_id in stopping_criteria.keyword_ids
-        ]
-        while generated_sequence[-1] in keyword_ids:
-            generated_sequence = generated_sequence[
-                :-1
-            ]  # remove last token if it is a keyword
+        if generated_sequence[-1] == self.tokenizer.eos_token_id:
             scores = scores[:-1]
 
         last_token_logits = scores[-1][
@@ -156,9 +152,6 @@ class Predictor(BasePredictor):
         decoded_outputs = self.tokenizer.decode(
             generated_sequence, skip_special_tokens=True
         ).strip()
-
-        if decoded_outputs.endswith(stop_str):
-            decoded_outputs = decoded_outputs[: -len(stop_str)].strip()
 
         return Output(
             output=decoded_outputs,
