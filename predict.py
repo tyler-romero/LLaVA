@@ -18,7 +18,7 @@ from llava.utils import disable_torch_init
 os.environ["HUGGINGFACE_HUB_CACHE"] = os.getcwd() + "/weights"
 
 # See options here: https://github.com/haotian-liu/LLaVA/blob/main/docs/MODEL_ZOO.md
-ACTIVE_MODEL = "liuhaotian/llava-v1.6-mistral-7b"
+ACTIVE_MODEL = "liuhaotian/llava-v1.6-34b"
 
 
 def get_model_name_from_path(model_path):
@@ -38,10 +38,12 @@ class Output(BaseModel):
     The output of the Predictor. This class is REQUIRED to be named "Output".
     """
 
-    output: str
-    top_tokens: list[str]
-    top_token_ids: list[int]
-    token_logprobs: list[float]
+    full_output: str
+    full_output_tokens: list[int]  # token ids for the full output
+    output: str  # truncated output
+    top_tokens: list[str]  # most likely options for last token in the truncated output
+    top_token_ids: list[int]  # token ids for the most likely tokens
+    token_logprobs: list[float]  # logprobs for the most likely tokens
 
 
 class Predictor(BasePredictor):
@@ -61,7 +63,12 @@ class Predictor(BasePredictor):
             load_4bit=False,
         )
 
-        eos_punctuation = [".", "!", "?"]
+        eos_punctuation = [
+            ".",
+            "!",
+            "?",
+            "▁",  # "_" is a special token that is typically used to represent a space
+        ]
         self.punctuation_ids = []
         for p in eos_punctuation:
             cur_keyword_ids = self.tokenizer.convert_tokens_to_ids(p)
@@ -141,10 +148,11 @@ class Predictor(BasePredictor):
             outputs.sequences[0], skip_special_tokens=True
         ).strip()  # [BS=1, SEQ_LEN] -> [SEQ_LEN]
 
-        generated_sequence = outputs.sequences[0]  # [BS=1, SEQ_LEN] -> [SEQ_LEN]
+        full_generated_sequence = outputs.sequences[0]  # [BS=1, SEQ_LEN] -> [SEQ_LEN]
         scores = outputs.scores  # [SEQ_LEN][BS=1, VOCAB_SIZE]
 
         # Remove stopping keywords and punctuation from end of the generated sequence
+        generated_sequence = full_generated_sequence
         while (
             generated_sequence[-1]
             in [self.tokenizer.eos_token_id] + self.punctuation_ids
@@ -159,13 +167,18 @@ class Predictor(BasePredictor):
         top_k_results = torch.topk(last_token_logprobs, k=logprobs, dim=0)
         top_k_logprobs = top_k_results.values.cpu().tolist()
         top_k_token_ids = top_k_results.indices.cpu().tolist()
-        top_k_tokens: list[str] = self.tokenizer.batch_decode(top_k_token_ids)
+        top_k_tokens: list[str] = self.tokenizer.convert_ids_to_tokens(top_k_token_ids)
 
+        full_decoded_outputs = self.tokenizer.decode(
+            full_generated_sequence, skip_special_tokens=True
+        ).strip()
         decoded_outputs = self.tokenizer.decode(
             generated_sequence, skip_special_tokens=True
         ).strip()
 
         return Output(
+            full_output=full_decoded_outputs,
+            full_output_tokens=full_generated_sequence.cpu().tolist(),
             output=decoded_outputs,
             top_tokens=top_k_tokens,
             top_token_ids=top_k_token_ids,
