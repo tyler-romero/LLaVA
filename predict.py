@@ -18,7 +18,7 @@ from llava.utils import disable_torch_init
 os.environ["HUGGINGFACE_HUB_CACHE"] = os.getcwd() + "/weights"
 
 # See options here: https://github.com/haotian-liu/LLaVA/blob/main/docs/MODEL_ZOO.md
-ACTIVE_MODEL = "liuhaotian/llava-v1.6-34b"
+ACTIVE_MODEL = "liuhaotian/llava-v1.6-mistral-7b"
 
 
 def get_model_name_from_path(model_path):
@@ -40,6 +40,7 @@ class Output(BaseModel):
 
     output: str
     top_tokens: list[str]
+    top_token_ids: list[int]
     token_logprobs: list[float]
 
 
@@ -59,6 +60,12 @@ class Predictor(BasePredictor):
             load_8bit=False,
             load_4bit=False,
         )
+
+        eos_punctuation = [".", "!", "?"]
+        self.punctuation_ids = []
+        for p in eos_punctuation:
+            cur_keyword_ids = self.tokenizer.convert_tokens_to_ids(p)
+            self.punctuation_ids.append(cur_keyword_ids)
 
     def predict(
         self,
@@ -130,23 +137,28 @@ class Predictor(BasePredictor):
                 )
             )
 
-        generated_sequence = outputs.sequences[
-            0, input_ids.shape[1] :
-        ]  # [BS=1, SEQ_LEN] -> [NEW_SEQ_LEN]
-        scores = outputs.scores  # [NEW_SEQ_LEN][BS, VOCAB_SIZE]
+        decoded_outputs = self.tokenizer.decode(
+            outputs.sequences[0], skip_special_tokens=True
+        ).strip()  # [BS=1, SEQ_LEN] -> [SEQ_LEN]
 
-        # Remove stopping keywords from end of the generated sequence
-        if generated_sequence[-1] == self.tokenizer.eos_token_id:
-            scores = scores[:-1]
+        generated_sequence = outputs.sequences[0]  # [BS=1, SEQ_LEN] -> [SEQ_LEN]
+        scores = outputs.scores  # [SEQ_LEN][BS=1, VOCAB_SIZE]
 
-        last_token_logits = scores[-1][
-            0, :
-        ]  # [NEW_SEQ_LEN][BS, VOCAB_SIZE] -> [VOCAB_SIZE]
+        # Remove stopping keywords and punctuation from end of the generated sequence
+        while (
+            generated_sequence[-1]
+            in [self.tokenizer.eos_token_id] + self.punctuation_ids
+        ):
+            generated_sequence = generated_sequence[:-1]
+            scores = scores[:-1]  # [SHORTED_SEQ_LEN][BS=1, VOCAB_SIZE]
 
+        # Extract logprobs for last token in the seq. [SHORTED_SEQ_LEN][BS, VOCAB_SIZE] -> [VOCAB_SIZE]
+        last_token_logits = scores[-1][0, :]
         last_token_logprobs = torch.log_softmax(last_token_logits, dim=0)
+
         top_k_results = torch.topk(last_token_logprobs, k=logprobs, dim=0)
         top_k_logprobs = top_k_results.values.cpu().tolist()
-        top_k_token_ids = top_k_results.indices
+        top_k_token_ids = top_k_results.indices.cpu().tolist()
         top_k_tokens: list[str] = self.tokenizer.batch_decode(top_k_token_ids)
 
         decoded_outputs = self.tokenizer.decode(
@@ -156,6 +168,7 @@ class Predictor(BasePredictor):
         return Output(
             output=decoded_outputs,
             top_tokens=top_k_tokens,
+            top_token_ids=top_k_token_ids,
             token_logprobs=top_k_logprobs,
         )
 
